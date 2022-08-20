@@ -1,0 +1,83 @@
+name: Update Website Stats
+
+on:
+  schedule:
+    # The monthly stats usually end up getting updates on the 2nd of each month
+    - cron:  '0 2 2 * *'
+  workflow_dispatch:
+
+jobs:
+  update_stats:
+    name: Update Website Stats
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.x'
+
+    - name: Set up env
+      run: |
+        python -m pip install awscli requests
+
+        # Set up AWS CLI
+        export AWSCLI_ACCESS=${{ secrets.AWSCLI_ACCESS }}
+        export AWSCLI_SECRET=${{ secrets.AWSCLI_SECRET }}
+        mkdir ~/.aws
+        echo "[default]" > ~/.aws/config
+        echo "[default]" > ~/.aws/credentials
+        echo "aws_access_key_id = $AWSCLI_ACCESS" >> ~/.aws/credentials
+        echo "aws_secret_access_key = $AWSCLI_SECRET" >> ~/.aws/credentials
+
+    - name: Clone zap-mgmt-scripts and zaproxy-website
+      run: |
+        # Setup git details
+        export GITHUB_USER=zapbot
+        export GITHUB_TOKEN=${{ secrets.ZAPBOT_TOKEN }}
+        git config --global user.email "12745184+zapbot@users.noreply.github.com"
+        git config --global user.name $GITHUB_USER
+        git clone https://github.com/$GITHUB_USER/zap-mgmt-scripts.git
+
+        git clone https://github.com/$GITHUB_USER/zaproxy-website.git
+
+        # Update to the latest upstream
+        cd zaproxy-website
+        git remote set-url origin https://$GITHUB_USER:$GITHUB_TOKEN@github.com/$GITHUB_USER/zaproxy-website.git
+        git remote add upstream https://github.com/zaproxy/zaproxy-website.git
+        git checkout statistics
+        git pull upstream master
+        git reset --hard upstream/master
+        git push origin --force
+
+    - name: Sync S3 files
+      run: |
+        mkdir project-zap
+        mkdir project-zap/stats
+        # Just sync the subdirectories we need
+        aws s3 sync s3://project-zap/stats/bitly/ project-zap/stats/bitly/
+        aws s3 sync s3://project-zap/stats/cfu/ project-zap/stats/cfu/
+        aws s3 sync s3://project-zap/stats/docker/ project-zap/stats/docker/
+        aws s3 sync s3://project-zap/stats/downloads/ project-zap/stats/downloads/
+        aws s3 sync s3://project-zap/stats/groups/ project-zap/stats/groups/
+        
+    - name: Generate the stats data files
+      run: |
+        cd zap-mgmt-scripts/stats
+        python stats.py website
+        cd ../..
+
+    - name: Update the newer website stats
+      run: |
+        cd zap-mgmt-scripts/stats
+        python website_stats2.py
+        cd ../..
+
+    - name: Raise a PR on the website
+      run: |
+        cd zaproxy-website
+        git add site/data/charts/*
+        git commit -s -m "Updated monthly statistics"
+        git push origin
+
+        echo ${{ secrets.ZAPBOT_TOKEN }} | gh auth login --with-token
+        gh pr create --fill
